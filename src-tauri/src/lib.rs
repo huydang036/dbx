@@ -1625,8 +1625,6 @@ pub fn run() {
                 AppState::new_with_plugin_dir_and_app_version(storage, plugin_dir, env!("CARGO_PKG_VERSION"))
             };
             dbx_core::db::sqlite_worker::enable_sqlite_ssh_runtime(env!("CARGO_PKG_VERSION"));
-            state.set_duckdb_worker_process_isolation_enabled(desktop_settings.duckdb_worker_process_isolation);
-            state.set_duckdb_worker_max_processes(desktop_settings.duckdb_worker_max_processes);
             let oidc_app_handle = app.handle().clone();
             state.set_mongo_oidc_browser_opener(Arc::new(move |url| {
                 oidc_app_handle
@@ -1939,8 +1937,6 @@ pub fn run() {
             commands::query::build_rename_database_sql,
             commands::query::build_rename_database_preflight_sql,
             commands::query::build_create_database_sql,
-            #[cfg(feature = "duckdb-sidecar")]
-            commands::query::build_duckdb_attach_database_sql,
             commands::query::build_sqlite_attach_database_sql,
             commands::query::build_drop_object_sql,
             commands::query::build_drop_table_sql,
