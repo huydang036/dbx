@@ -4,6 +4,22 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g., v1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as prerelease'
+        required: false
+        default: false
+        type: boolean
+      skip_verify:
+        description: 'Skip draft release verification'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -12,18 +28,37 @@ jobs:
   release-ready:
     name: Verify draft release
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.set-tag.outputs.tag_name }}
+      is_prerelease: ${{ steps.set-tag.outputs.is_prerelease }}
     steps:
+      - name: Set tag name
+        id: set-tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="${{ github.event.inputs.tag_name }}"
+            IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            TAG_NAME="${GITHUB_REF_NAME}"
+            IS_PRERELEASE="false"
+          fi
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+          
       - name: Wait for the draft release
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.skip_verify != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.set-tag.outputs.tag_name }}
         shell: bash
         run: |
           for attempt in $(seq 1 30); do
-            RELEASE_JSON="$(gh release view "${GITHUB_REF_NAME}" \
+            RELEASE_JSON="$(gh release view "${TAG_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json tagName,isDraft,body 2>/dev/null || true)"
             if [ -n "$RELEASE_JSON" ] \
-              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${GITHUB_REF_NAME}" ] \
+              && [ "$(jq -r '.tagName' <<<"$RELEASE_JSON")" = "${TAG_NAME}" ] \
               && [ "$(jq -r '.isDraft' <<<"$RELEASE_JSON")" = true ] \
               && [ -n "$(jq -r '.body' <<<"$RELEASE_JSON")" ]; then
               echo "Agent-created draft release is ready."
@@ -31,8 +66,28 @@ jobs:
             fi
             sleep 2
           done
-          echo "Agent-created draft release was not ready for ${GITHUB_REF_NAME}." >&2
+          echo "Agent-created draft release was not ready for ${TAG_NAME}." >&2
           exit 1
+          
+      - name: Create draft release if running manually
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.skip_verify != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ steps.set-tag.outputs.tag_name }}
+          IS_PRERELEASE: ${{ steps.set-tag.outputs.is_prerelease }}
+        shell: bash
+        run: |
+          if ! gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" 2>/dev/null; then
+            gh release create "${TAG_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG_NAME}" \
+              --draft \
+              --prerelease="${IS_PRERELEASE}" \
+              --generate-notes
+            echo "Created draft release: ${TAG_NAME}"
+          else
+            echo "Release ${TAG_NAME} already exists"
+          fi
 
   build-windows:
     needs: release-ready
@@ -43,8 +98,6 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
-          - target: aarch64-pc-windows-msvc
-            arch: arm64
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
@@ -77,39 +130,7 @@ jobs:
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
-
-      - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
-        shell: bash
-        env:
-          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
-          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
-          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            case "${RUNNER_OS}" in
-              Linux)
-                echo "CC=${SCCACHE_PATH} cc"
-                echo "CXX=${SCCACHE_PATH} c++"
-                ;;
-              macOS)
-                echo "CC=${SCCACHE_PATH} clang"
-                echo "CXX=${SCCACHE_PATH} clang++"
-                ;;
-            esac
-          } >> "$GITHUB_ENV"
-
+          
       - name: Compute Rust dependency hash
         id: deps-hash
         shell: bash
@@ -157,7 +178,7 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         with:
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ needs.release-ready.outputs.tag_name }}
           releaseDraft: true
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
 
@@ -182,40 +203,6 @@ jobs:
             $msiInstallers.FullName
           )
 
-      - name: Upload Windows WebView2 offline installer
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
-          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
-        run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
-          $arch = "${{ matrix.arch }}"
-          $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
-          $offlineName = "DBX_${version}_${arch}-offline-setup.exe"
-          $before = @{}
-
-          if (Test-Path $bundleDir) {
-            Get-ChildItem $bundleDir -Filter "*.exe" | ForEach-Object { $before[$_.FullName] = $_.LastWriteTimeUtc }
-          }
-
-          pnpm tauri bundle --bundles nsis --target ${{ matrix.target }} `
-            --config src-tauri/tauri.webview2-offline.conf.json `
-            --config src-tauri/tauri.vsign.conf.json
-
-          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
-            Where-Object { !$before.ContainsKey($_.FullName) -or $_.LastWriteTimeUtc -gt $before[$_.FullName] } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-
-          if (!$installer) {
-            throw "Missing WebView2 offline installer in ${bundleDir}"
-          }
-
-          ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
-          Copy-Item $installer.FullName $offlineName -Force
-          gh release upload "${env:GITHUB_REF_NAME}" $offlineName --repo "${env:GITHUB_REPOSITORY}" --clobber
-
       - name: Upload Windows portable ZIP
         timeout-minutes: 20
         shell: pwsh
@@ -224,7 +211,8 @@ jobs:
           SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
           VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
         run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          $tagName = "${{ needs.release-ready.outputs.tag_name }}"
+          $version = $tagName.TrimStart("v")
           $arch = "${{ matrix.arch }}"
           $portableRoot = "portable"
           $portableDir = Join-Path $portableRoot "DBX_${version}_${arch}"
@@ -271,7 +259,7 @@ jobs:
             throw "Missing portable update signature: $signatureName"
           }
 
-          gh release upload "${env:GITHUB_REF_NAME}" $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
+          gh release upload $tagName $zipName $signatureName --repo "${env:GITHUB_REPOSITORY}" --clobber
 
       - name: Show sccache stats
         if: always()
@@ -292,146 +280,19 @@ jobs:
             Remove-Item -LiteralPath $workDir -Recurse -Force
           }
 
-  build-windows-7-offline:
-    needs: release-ready
-    runs-on: windows-2022
-    environment: release-signing
-    env:
-      CARGO_INCREMENTAL: "0"
-      RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
-      VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
-      VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
-      VSIGN_SERVER: ${{ vars.VSIGN_SERVER }}
-      VSIGN_TOOL_SHA256: ${{ vars.VSIGN_TOOL_SHA256 }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Install frontend dependencies
-        run: pnpm install
-
-      - name: Setup Rust for Windows 7
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly-2026-07-22
-          components: rust-src
-
-      - name: Prepare Win7-compatible WebView2 loader
-        shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-loader.ps1
-
-      - name: Prepare WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/prepare-webview2-win7-runtime.ps1
-
-      - name: Probe WebView2 109 fixed runtime
-        shell: pwsh
-        run: ./.github/scripts/assert-webview2-win7-runtime.ps1
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./ -> target"
-          shared-key: release-x86_64-win7-windows-msvc
-          add-rust-environment-hash-key: true
-          cache-targets: false
-          cache-on-failure: true
-
-      - name: Build frontend
-        run: pnpm build
-
-      - name: Build DBX for Windows 7
-        shell: pwsh
-        run: |
-          $env:TAURI_CONFIG = Get-Content src-tauri/tauri.webview2-win7-fixed.conf.json -Raw
-          cargo build --locked --package dbx --release --features custom-protocol --target x86_64-win7-windows-msvc -Z build-std=std,panic_abort
-
-      - name: Audit Windows 7 PE imports
-        shell: pwsh
-        run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
-
-      - name: Audit Win7 WebView2 loader markers
-        shell: pwsh
-        run: ./.github/scripts/assert-webview2-win7-loader.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
-
-      - name: Setup TrustAsia VSign
-        shell: pwsh
-        env:
-          VSIGN_OPERATOR_PFX_B64: ${{ secrets.VSIGN_OPERATOR_PFX_B64 }}
-          VSIGN_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
-        run: ./.github/scripts/setup-vsign.ps1
-
-      - name: Bundle and upload Windows 7 / Server 2012 R2 fixed-runtime installer
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SSIGNCODE_OPERATOR_PWD: ${{ secrets.VSIGN_OPERATOR_PWD }}
-          VSIGN_KEY_PIN: ${{ secrets.VSIGN_KEY_PIN }}
-        run: |
-          $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
-          $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
-          $checksumName = "${offlineName}.sha256"
-          $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-          $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
-
-          if (!$appVersion -or $appVersion -ne $version) {
-            Write-Error "Release tag version $version does not match the built DBX package version $appVersion"
-            exit 1
-          }
-
-          pnpm tauri bundle --bundles nsis --target x86_64-win7-windows-msvc `
-            --config src-tauri/tauri.webview2-win7-fixed.conf.json `
-            --config src-tauri/tauri.vsign.conf.json
-
-          $installer = Get-ChildItem $bundleDir -Filter "*.exe" |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (!$installer) {
-            Write-Error "Missing Windows 7 / Server 2012 R2 fixed-runtime installer in ${bundleDir}"
-            exit 1
-          }
-
-          ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
-          ./.github/scripts/assert-authenticode.ps1 -Path $installer.FullName
-
-          Copy-Item $installer.FullName $offlineName -Force
-          $hash = (Get-FileHash -LiteralPath $offlineName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $offlineName" | Set-Content -LiteralPath $checksumName -Encoding ascii
-          gh release upload "${env:GITHUB_REF_NAME}" $offlineName $checksumName `
-            --repo "${env:GITHUB_REPOSITORY}" --clobber
-
-      - name: Remove temporary VSign files
-        if: always()
-        shell: pwsh
-        run: |
-          $workDir = if ([string]::IsNullOrWhiteSpace($env:VSIGN_WORK_DIR)) {
-            Join-Path $env:RUNNER_TEMP "vsign-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          } else {
-            $env:VSIGN_WORK_DIR
-          }
-          if (Test-Path -LiteralPath $workDir) {
-            Remove-Item -LiteralPath $workDir -Recurse -Force
-          }
-
   cleanup-release-signatures:
-    needs: [build-windows, build-windows-7-offline]
+    needs: [build-windows]
     runs-on: ubuntu-latest
+    if: always() && needs.build-windows.result == 'success'
     steps:
       - name: Remove standalone updater signature assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          TAG_NAME="${{ needs.release-ready.outputs.tag_name }}"
           mapfile -t SIG_ASSETS < <(
-            gh release view "${GITHUB_REF_NAME}" \
+            gh release view "${TAG_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
               --json assets \
               --jq '.assets[].name | select(endswith(".sig") and (endswith("-portable.zip.sig") | not))'
@@ -444,16 +305,7 @@ jobs:
 
           for ASSET in "${SIG_ASSETS[@]}"; do
             echo "Deleting release asset: ${ASSET}"
-            gh release delete-asset "${GITHUB_REF_NAME}" "${ASSET}" \
+            gh release delete-asset "${TAG_NAME}" "${ASSET}" \
               --repo "${GITHUB_REPOSITORY}" \
               --yes
           done
-
-  publish:
-    needs: [cleanup-release-signatures]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish draft release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
