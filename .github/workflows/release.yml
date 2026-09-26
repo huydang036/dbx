@@ -40,6 +40,7 @@ jobs:
           exit 1
 
   nix-packaging:
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
@@ -52,6 +53,7 @@ jobs:
         run: nix build .#dbx-desktop --no-link --print-build-logs
 
   bump-jdbc-plugin-version:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.bump.outputs.changed }}
@@ -117,6 +119,7 @@ jobs:
           done
 
   build:
+    if: ${{ false }}
     # Explicit name keeps matrix-only fields such as asset_pattern from being
     # appended to the generated job display name.
     name: build (${{ matrix.platform }}, ${{ matrix.target }})
@@ -310,8 +313,6 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: x64
-          - target: aarch64-pc-windows-msvc
-            arch: arm64
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
@@ -570,6 +571,7 @@ jobs:
           }
 
   build-windows-7-offline:
+    if: ${{ false }}
     needs: release-ready
     runs-on: windows-2022
     environment: release-signing
@@ -713,6 +715,7 @@ jobs:
           }
 
   build-windows-7-static-browser:
+    if: ${{ false }}
     needs: release-ready
     runs-on: windows-2022
     strategy:
@@ -796,6 +799,7 @@ jobs:
           gh release upload "${env:GITHUB_REF_NAME}" $zipName $zipSha256 --repo "${env:GITHUB_REPOSITORY}" --clobber
 
   static-browser:
+    if: ${{ false }}
     # Fully static musl builds of the browser (dbx-web) variant. No glibc
     # dependency, so the tarball runs on any Linux distribution (verified in
     # the oldest pullable Ubuntu container for each arch).
@@ -942,7 +946,7 @@ jobs:
         run: ${SCCACHE_PATH} --show-stats
 
   cleanup-release-signatures:
-    needs: [build, build-windows, build-windows-7-offline]
+    needs: [build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Remove standalone updater signature assets
@@ -970,6 +974,7 @@ jobs:
           done
 
   jdbc-plugin:
+    if: ${{ false }}
     needs: [cleanup-release-signatures, bump-jdbc-plugin-version]
     runs-on: ubuntu-latest
     steps:
@@ -1029,6 +1034,7 @@ jobs:
             --clobber
 
   publish:
+    if: ${{ false }}
     # Keep the release as a draft until every release-blocking platform job passes.
     # Nix packaging and the Windows 7 static-browser build are advisory and
     # upload their release assets independently of publication.
@@ -1041,6 +1047,7 @@ jobs:
         run: gh release edit ${{ github.ref_name }} --repo ${{ github.repository }} --draft=false --prerelease
 
   sync-release-to-cnb:
+    if: ${{ false }}
     name: Sync release to CNB
     needs: publish
     runs-on: ubuntu-latest
@@ -1087,10 +1094,11 @@ jobs:
             --apply
 
   notify-feishu:
+    if: ${{ false }}
     name: Notify Feishu group
     needs: [publish, sync-release-to-cnb]
     # Card sends once the release is public even if the CNB mirror sync failed.
-    if: always() && needs.publish.result == 'success'
+    # if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -1106,6 +1114,7 @@ jobs:
         run: python3 scripts/notify_feishu.py "${{ github.ref_name }}"
 
   docker:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1182,6 +1191,7 @@ jobs:
           retention-days: 1
 
   docker-manifest:
+    if: ${{ false }}
     needs: docker
     runs-on: ubuntu-latest
     steps:
