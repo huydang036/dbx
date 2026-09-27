@@ -12,7 +12,7 @@ jobs:
     runs-on: windows-2022
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
+      # Đã xóa RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@v5
 
@@ -32,10 +32,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      # Thay sccache bằng rust-cache
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
-          version: "v0.10.0"
+          workspaces: src-tauri -> target
+          shared-key: "windows-x86_64"
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
